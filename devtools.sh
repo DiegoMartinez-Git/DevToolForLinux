@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  DevTools v6.0 - Ultimate Edition (Whiptail UI, Sudo Lock, Smart Cache)
+#  DevTools v6.1 - Literal Code Fix (Antigravity Unchained)
 # =============================================================================
 
 set -eo pipefail
@@ -11,13 +11,13 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
 
 # ── Configuracion ──────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="6.0.0"
+readonly SCRIPT_VERSION="6.1.0"
 readonly LOG_DIR="${HOME}/.devtools"
 readonly STATE_DIR="${LOG_DIR}/state"
 readonly LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 readonly MIN_DISK_MB=5120
 readonly DELIM='§'
-readonly UPDATE_CACHE_SEC=86400 # 24 horas en segundos
+readonly UPDATE_CACHE_SEC=86400 # 24 horas
 
 # ── Colores ────────────────────────────────────────────────────────────────
 declare -r C_RESET=$'\033[0m'
@@ -82,7 +82,7 @@ readonly TOOLS=(
   "Ollama§ollama --version§curl§ollama§--version§ia"
   "Claude Code§claude --version§npm§@anthropic-ai/claude-code§--version§ia"
   "DeepSeek TUI§deepseek --version§npm§deepseek-tui§--version§ia"
-  "Antigravity§antigravity --version§repo§antigravity§--version§ia"
+  "Antigravity§antigravity§repo§antigravity§§ia" 
 )
 
 # =============================================================================
@@ -170,7 +170,6 @@ ENDOFBANNER
 }
 
 menu_interactivo() {
-  # Instalar whiptail (librería gráfica de menús) si no existe
   if ! command -v whiptail &>/dev/null; then
     printf "  Instalando dependencias de la interfaz...\n"
     case "$PKG_MANAGER" in
@@ -183,11 +182,9 @@ menu_interactivo() {
   local opciones=()
   for tool in "${TOOLS[@]}"; do
     parse_tool "$tool"
-    # Todas las opciones marcadas por defecto ("ON")
     opciones+=("$T_NAME" "Grupo: $T_GROUP" "ON")
   done
 
-  # Mostrar el checklist de Whiptail
   local SELECCION
   SELECCION=$(whiptail --title "DevTools v$SCRIPT_VERSION" --checklist \
     "Selecciona las herramientas a instalar o actualizar.\n(Usa ESPACIO para marcar/desmarcar y ENTER para confirmar):" \
@@ -198,7 +195,6 @@ menu_interactivo() {
     exit 0
   fi
 
-  # Transformar la selección de Whiptail en un Array puro de Bash
   eval set -- $SELECCION
   SELECTED_TOOLS_ARRAY=("$@")
   
@@ -282,12 +278,17 @@ install_repo() {
             sudo apt-get update -qq || true; sudo apt-get install -y brave-browser; } &>> "$LOG_FILE" || return 1
         else install_apt "brave-browser" || return 1; fi ;;
       antigravity)
-        if ! check_cmd "antigravity --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/antigravity-repo-key.gpg
-            sudo chmod go+r /etc/apt/keyrings/antigravity-repo-key.gpg
-            echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | sudo tee /etc/apt/sources.list.d/antigravity.list >/dev/null
-            sudo apt-get update -qq || true; sudo apt-get install -y antigravity; } &>> "$LOG_FILE" || return 1
-        else install_apt "antigravity" || return 1; fi ;;
+        if ! check_cmd "antigravity" 2>/dev/null; then
+          printf "\n    [>] Ejecutando instalacion directa de Antigravity...\n"
+          # Literalmente tu codigo, sin ocultar output en el log
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/antigravity-repo-key.gpg || return 1
+          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null || return 1
+          sudo apt update || true
+          sudo apt install -y antigravity || return 1
+        else 
+          install_apt "antigravity" || return 1
+        fi ;;
       *) install_apt "$pkg" || return 1 ;;
     esac
   elif [[ "$OS_ID" == "arch" ]]; then
@@ -383,7 +384,6 @@ main() {
 
   # 4. BUCLE DE INSTALACIÓN (Solo las seleccionadas)
   for st in "${SELECTED_TOOLS_ARRAY[@]}"; do
-    # Buscar el registro de la herramienta en el array global
     for tool in "${TOOLS[@]}"; do
       parse_tool "$tool"
       if [[ "$T_NAME" == "$st" ]]; then
@@ -408,7 +408,7 @@ main() {
         if $skip_update; then
           ((SKIPPED_COUNT++)) || true
           printf '%bOMITIDO (Act. <24h)%b\n' "${C_DIM}" "${C_RESET}"
-          break # Rompe el for interno para pasar a la siguiente herramienta seleccionada
+          break
         fi
 
         local install_ok=false
@@ -433,7 +433,7 @@ main() {
           printf '%bFAIL%b\n' "${C_RED}" "${C_RESET}"
         fi
         
-        break # Herramienta procesada, salir del bucle de búsqueda
+        break
       fi
     done
   done
