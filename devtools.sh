@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  DevTools v3.0 - Instalador / Actualizador de herramientas de desarrollo
+#  DevTools v3.1 - Instalador / Actualizador de herramientas de desarrollo
 #  Compatible: Debian/Ubuntu, Arch Linux, Fedora
-#  Uso:        bash devtools.sh [--dry-run] [--quiet] [--only <grupo>]
 # =============================================================================
 
 # ── Modo estricto ──────────────────────────────────────────────────────────
 set -eo pipefail
 shopt -s extglob
 
-# Exportar rutas comunes por si se instalan herramientas en la misma sesión
+# Exportar rutas comunes
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export DEBIAN_FRONTEND=noninteractive
 
 # ── Configuracion ──────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="3.0.0"
+readonly SCRIPT_VERSION="3.1.0"
 readonly LOG_DIR="${HOME}/.devtools"
 readonly LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 readonly MIN_DISK_MB=5120
-readonly DELIM='§'   # Separador de campos: no aparece en comandos shell
+readonly DELIM='§'
 
-# ── Colores (escapes ANSI reales) ──────────────────────────────────────────
+# ── Colores ────────────────────────────────────────────────────────────────
 declare -r C_RESET=$'\033[0m'
 declare -r C_BOLD=$'\033[1m'
 declare -r C_DIM=$'\033[2m'
@@ -55,12 +54,10 @@ trap 'printf "\n%b ERROR inesperado (codigo %d). Log: %s%b\n" "$BG_RED" "$?" "$L
 
 # =============================================================================
 #  HERRAMIENTAS
-#  Formato: name § check_cmd § type § package § version_flag § group
-#  type: apt | pacman | dnf | curl | npm | pipx | repo | flatpak | custom
 # =============================================================================
 readonly TOOLS=(
   "curl§curl --version§apt§curl§--version§core"
-  "ca-certificates§[ -f /etc/ssl/certs/ca-certificates.crt ]§apt§ca-certificates§§core"
+  "apt-tools§bash -c 'dpkg -s apt-transport-https software-properties-common &>/dev/null'§apt§ca-certificates apt-transport-https software-properties-common§§core"
   "gnupg§gpg --version§apt§gnupg§--version§core"
   "git§git --version§apt§git§--version§core"
   "python3§python3 --version§apt§python3§--version§lang"
@@ -80,7 +77,7 @@ readonly TOOLS=(
   "jq§jq --version§apt§jq§--version§data"
   "yq§yq --version§pipx§yq§--version§data"
   "tmux§tmux -V§apt§tmux§-V§shell"
-  "btm§btm --version§apt§bottom§--version§monitor"
+  "btm§btm --version§custom§btm§--version§monitor"
   "ncdu§ncdu --version§apt§ncdu§--version§monitor"
   "lazygit§lazygit --version§repo§lazygit§--version§git"
   "GitHub CLI§gh --version§repo§gh§--version§git"
@@ -164,7 +161,7 @@ detect_os() {
         OS_ID="arch";   PKG_MANAGER="pacman" ;;
       fedora|rhel|centos|rocky|almalinux)
         OS_ID="fedora"; PKG_MANAGER="dnf" ;;
-      *) die "Distribucion no soportada: ${ID:-desconocida}" ;;
+      *) die "Distribucion no soportada" ;;
     esac
   else
     die "No se encuentra /etc/os-release"
@@ -179,11 +176,8 @@ detect_os() {
 
 check_connectivity() {
   section "Verificando conectividad"
-  if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
-    ok "Conexion a Internet: OK"
-  else
-    die "Sin conexion a Internet"
-  fi
+  if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then ok "Conexion a Internet: OK"
+  else die "Sin conexion a Internet"; fi
 }
 
 check_disk() {
@@ -201,11 +195,7 @@ sudo_cache() {
   if command -v sudo &>/dev/null && sudo -v 2>/dev/null; then
     ok "Permisos sudo OK"
     ( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 $$ 2>/dev/null || exit; done ) &
-  elif command -v sudo &>/dev/null; then
-    warn "No se pudo cachear sudo"
-  else
-    warn "sudo no encontrado"
-  fi
+  else warn "No se pudo cachear sudo"; fi
 }
 
 # =============================================================================
@@ -244,7 +234,7 @@ menu() {
     case "$choice" in
       1) return 0 ;;
       2) printf '\n  %bCancelado.%b\n\n' "${C_YELLOW}" "${C_RESET}"; exit 0 ;;
-      *) printf '  %bOpcion invalida. Elige 1 o 2.%b\n' "${C_RED}" "${C_RESET}" ;;
+      *) printf '  %bOpcion invalida.%b\n' "${C_RED}" "${C_RESET}" ;;
     esac
   done
 }
@@ -256,21 +246,18 @@ menu() {
 tool_status() {
   local name="$1" check="$2" flag="$3" ver icon
   if check_cmd "$check" 2>/dev/null; then
-    ver=$(get_version "$check" "$flag")
-    icon="$ICON_OK"
+    ver=$(get_version "$check" "$flag"); icon="$ICON_OK"
   else
-    ver="no instalado"
-    icon="$ICON_FAIL"
+    ver="no instalado"; icon="$ICON_FAIL"
   fi
   printf '  %b  %-28s %b%s%b\n' "$icon" "$name" "${C_DIM}" "$ver" "${C_RESET}"
 }
 
 status_all() {
-  section "Estado actual de las herramientas"
+  section "Estado actual"
   printf '\n'
   for tool in "${TOOLS[@]}"; do
-    parse_tool "$tool"
-    tool_status "$T_NAME" "$T_CHECK" "$T_FLAG"
+    parse_tool "$tool"; tool_status "$T_NAME" "$T_CHECK" "$T_FLAG"
   done
   printf '\n'
 }
@@ -288,13 +275,8 @@ update_pkg_index() {
 }
 
 install_apt() {
-  local pkg="$1"
-  if dpkg -s "$pkg" &>/dev/null; then
-    info "${pkg}: actualizando..."
-    $DRY_RUN || sudo apt-get install --only-upgrade -y "$pkg" &>> "$LOG_FILE" || return 1
-  else
-    $DRY_RUN || sudo apt-get install -y "$pkg" &>> "$LOG_FILE" || return 1
-  fi
+  local pkgs="$1"
+  $DRY_RUN || sudo apt-get install -y $pkgs &>> "$LOG_FILE" || return 1
 }
 
 install_pacman() {
@@ -305,7 +287,6 @@ install_dnf() {
   $DRY_RUN || sudo dnf install -y "$1" &>> "$LOG_FILE" || return 1
 }
 
-# Helper para cargar fnm en la sesión actual
 load_fnm() {
   export FNM_PATH="${HOME}/.local/share/fnm"
   if [[ -d "$FNM_PATH" ]]; then
@@ -330,12 +311,12 @@ install_curl_script() {
       $DRY_RUN || curl -fsSL https://get.docker.com | sh &>> "$LOG_FILE" || return 1
       $DRY_RUN || sudo usermod -aG docker "$USER" 2>/dev/null || true
       ;;
-    *) warn "No hay instalador curl para: $pkg"; return 1 ;;
+    *) return 1 ;;
   esac
 }
 
 install_npm() {
-  load_fnm # Asegurar que npm esté disponible si Node se acaba de instalar
+  load_fnm
   $DRY_RUN || npm install -g "$1" &>> "$LOG_FILE" || return 1
 }
 
@@ -351,10 +332,8 @@ install_repo() {
         gh)
           if ! check_cmd "gh --version" 2>/dev/null; then
             $DRY_RUN || {
-              curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg &>/dev/null
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+              curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg &>/dev/null
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
               sudo apt-get update -qq && sudo apt-get install -y gh
             } &>> "$LOG_FILE" || return 1
           else install_apt "gh" || return 1; fi
@@ -364,19 +343,15 @@ install_repo() {
             sudo apt-get update -qq && sudo apt-get install -y lazygit; } &>> "$LOG_FILE" || return 1 ;;
         code)
           if ! check_cmd "code --version" 2>/dev/null; then
-            $DRY_RUN || { curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-              | gpg --dearmor | sudo tee /usr/share/keyrings/packages.microsoft.gpg >/dev/null
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
-              | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null
+            $DRY_RUN || { curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/packages.microsoft.gpg >/dev/null
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null
               sudo apt-get update -qq && sudo apt-get install -y code; } &>> "$LOG_FILE" || return 1
           else install_apt "code" || return 1; fi
           ;;
         brave-browser)
           if ! check_cmd "brave-browser --version" 2>/dev/null; then
-            $DRY_RUN || { sudo curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
-              https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
-              echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" \
-              | sudo tee /etc/apt/sources.list.d/brave-browser-release.list >/dev/null
+            $DRY_RUN || { sudo curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+              echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list >/dev/null
               sudo apt-get update -qq && sudo apt-get install -y brave-browser; } &>> "$LOG_FILE" || return 1
           else install_apt "brave-browser" || return 1; fi
           ;;
@@ -395,8 +370,7 @@ install_repo() {
           sudo dnf install -y gh; } &>> "$LOG_FILE" || return 1 ;;
         lazygit) install_dnf "lazygit" || return 1 ;;
         code) $DRY_RUN || { sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
-          printf '[code]\nname=VS Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc\n' \
-          | sudo tee /etc/yum.repos.d/vscode.repo >/dev/null
+          printf '[code]\nname=VS Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc\n' | sudo tee /etc/yum.repos.d/vscode.repo >/dev/null
           sudo dnf check-update -q && sudo dnf install -y code; } &>> "$LOG_FILE" || return 1 ;;
         brave-browser) $DRY_RUN || { sudo dnf install -y dnf5-plugins &>/dev/null
           sudo dnf config-manager addrepo --from-repofile=https://brave-browser-rpm-release.s3.brave.com/brave-browser.repo &>/dev/null
@@ -409,8 +383,7 @@ install_repo() {
 
 install_flatpak() {
   if ! command -v flatpak &>/dev/null; then
-    install_apt flatpak 2>/dev/null || install_pacman flatpak 2>/dev/null || install_dnf flatpak 2>/dev/null || {
-      warn "No se pudo instalar flatpak"; return 1; }
+    install_apt flatpak 2>/dev/null || install_pacman flatpak 2>/dev/null || install_dnf flatpak 2>/dev/null || return 1
   fi
   $DRY_RUN || flatpak install -y flathub "$1" &>> "$LOG_FILE" || return 1
 }
@@ -423,7 +396,7 @@ install_custom() {
       if command -v fnm &>/dev/null; then
         $DRY_RUN || fnm install --lts &>> "$LOG_FILE" || return 1
         $DRY_RUN || fnm default lts-latest &>> "$LOG_FILE" || return 1
-      else warn "fnm no disponible"; return 1; fi
+      else return 1; fi
       ;;
     npm)
       load_fnm
@@ -431,14 +404,18 @@ install_custom() {
     ohmyzsh)
       if [[ ! -d "${HOME}/.oh-my-zsh" ]]; then
         $DRY_RUN || { sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-          git clone https://github.com/zsh-users/zsh-autosuggestions \
-            "${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" 2>/dev/null || true
-          git clone https://github.com/zsh-users/zsh-syntax-highlighting \
-            "${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting" 2>/dev/null || true
+          git clone https://github.com/zsh-users/zsh-autosuggestions "${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" 2>/dev/null || true
+          git clone https://github.com/zsh-users/zsh-syntax-highlighting "${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting" 2>/dev/null || true
         } &>> "$LOG_FILE" || return 1
       else $DRY_RUN || zsh -c "omz update" &>> "$LOG_FILE" || true; fi
       ;;
-    *) warn "No hay instalador custom: $pkg"; return 1 ;;
+    btm)
+      if ! command -v cargo &>/dev/null; then
+        $DRY_RUN || sudo apt-get install -y cargo &>> "$LOG_FILE" || return 1
+      fi
+      $DRY_RUN || cargo install bottom --locked &>> "$LOG_FILE" || return 1
+      ;;
+    *) return 1 ;;
   esac
 }
 
@@ -460,21 +437,18 @@ progress_bar() {
 }
 
 install_all() {
-  section "Instalando / Actualizando herramientas"
+  section "Instalando / Actualizando"
   printf '\n'
 
   TOTAL_TOOLS=${#TOOLS[@]}
-  (( TOTAL_TOOLS == 0 )) && { warn "No hay herramientas definidas."; return 1; }
+  (( TOTAL_TOOLS == 0 )) && return 1
 
   update_pkg_index
   local current=0 had_it install_ok
 
   for tool in "${TOOLS[@]}"; do
     parse_tool "$tool"
-
-    if [[ -n "$ONLY_GROUP" && "$T_GROUP" != "$ONLY_GROUP" ]]; then
-      ((SKIPPED_COUNT++)) || true; continue
-    fi
+    [[ -n "$ONLY_GROUP" && "$T_GROUP" != "$ONLY_GROUP" ]] && { ((SKIPPED_COUNT++)) || true; continue; }
 
     ((current++)) || true
     progress_bar "$current" "$TOTAL_TOOLS" "$T_NAME"
@@ -493,12 +467,10 @@ install_all() {
       repo)    install_repo "$T_NAME" "$T_PKG" && install_ok=true ;;
       flatpak) install_flatpak "$T_PKG"      && install_ok=true ;;
       custom)  install_custom "$T_NAME" "$T_PKG" && install_ok=true ;;
-      *)       warn "Tipo desconocido: $T_TYPE" ;;
     esac
 
     if $DRY_RUN; then
-      $had_it && printf ' %b(act.)%b' "${C_YELLOW}" "${C_RESET}" \
-               || printf ' %b(inst.)%b' "${C_RED}" "${C_RESET}"
+      $had_it && printf ' %b(act.)%b' "${C_YELLOW}" "${C_RESET}" || printf ' %b(inst.)%b' "${C_RED}" "${C_RESET}"
     fi
 
     if $install_ok || $DRY_RUN; then ((INSTALLED_COUNT++)) || true
@@ -513,14 +485,13 @@ install_all() {
 # =============================================================================
 
 summary() {
-  section "Resumen de instalacion"
+  section "Resumen"
   printf '\n  %-30s %-8s %s\n' "HERRAMIENTA" "ESTADO" "VERSION"
   printf '  %-30s %-8s %s\n' "────────────────────────────" "──────" "──────"
 
   for tool in "${TOOLS[@]}"; do
     parse_tool "$tool"
     [[ -n "$ONLY_GROUP" && "$T_GROUP" != "$ONLY_GROUP" ]] && continue
-
     local icon="$ICON_FAIL" ver="FALLO"
     if check_cmd "$T_CHECK" 2>/dev/null; then
       ver=$(get_version "$T_CHECK" "$T_FLAG"); icon="$ICON_OK"
@@ -529,20 +500,9 @@ summary() {
   done
 
   printf '\n  %bResultado:%b\n' "${C_BOLD}" "${C_RESET}"
-  printf '    Instalado/Actualizado: %b%d%b\n' "${C_GREEN}" "$INSTALLED_COUNT" "${C_RESET}"
-  printf '    Fallos:                %b%d%b\n' "${C_RED}"   "$FAILED_COUNT"    "${C_RESET}"
-  [[ $SKIPPED_COUNT -gt 0 ]] && printf '    Omitidos (filtro):     %b%d%b\n' "${C_DIM}" "$SKIPPED_COUNT" "${C_RESET}"
+  printf '    Exitoso: %b%d%b\n' "${C_GREEN}" "$INSTALLED_COUNT" "${C_RESET}"
+  printf '    Fallos:  %b%d%b\n' "${C_RED}"   "$FAILED_COUNT"    "${C_RESET}"
   printf '\n  %bLog: %s%b\n\n' "${C_DIM}" "$LOG_FILE" "${C_RESET}"
-
-  if check_cmd "zsh --version" 2>/dev/null && [[ "${SHELL:-}" != *zsh* ]]; then
-    printf '  %b[!] zsh instalada. Default: chsh -s %s%b\n\n' "${C_YELLOW}" "$(command -v zsh)" "${C_RESET}"
-  fi
-  if check_cmd "docker --version" 2>/dev/null; then
-    printf '  %b[!] Docker: cierra sesion para usar sin sudo.%b\n\n' "${C_YELLOW}" "${C_RESET}"
-  fi
-  if check_cmd "fnm --version" 2>/dev/null; then
-    printf '  %b[!] fnm: anade a .bashrc/.zshrc: %b\n    export PATH="$HOME/.local/share/fnm:$PATH"\n    eval "$(fnm env)"%b\n\n' "${C_YELLOW}" "${C_DIM}" "${C_RESET}"
-  fi
 }
 
 # =============================================================================
@@ -551,25 +511,13 @@ summary() {
 
 main() {
   mkdir -p "$LOG_DIR"
-
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run) DRY_RUN=true; shift ;;
       --quiet)   QUIET=true;   shift ;;
-      --only)    ONLY_GROUP="$2"; shift 2
-        case "$ONLY_GROUP" in
-          ia|shell|lang|git|data|container|editor|browser|notes|monitor|core) ;;
-          *) die "Grupo '$ONLY_GROUP' no valido" ;;
-        esac ;;
-      --help|-h)
-        printf 'Uso: %s [--dry-run] [--quiet] [--only grupo]\n' "$0"
-        printf 'Grupos: ia shell core lang git data container editor browser notes monitor\n'
-        exit 0 ;;
-      *) die "Argumento: $1" ;;
+      *) die "Argumento invalido" ;;
     esac
   done
-
-  $DRY_RUN && warn "MODO DRY-RUN"
 
   detect_os
   check_connectivity
