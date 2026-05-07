@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  DevTools v5.0 - Sudo Pre-Check, Smart 24h Cache & Repo Fixes
+#  DevTools v5.1 - The Bulletproof Update (Bypass broken PPAs)
 # =============================================================================
 
 set -eo pipefail
@@ -11,7 +11,7 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
 
 # ── Configuracion ──────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="5.0.0"
+readonly SCRIPT_VERSION="5.1.0"
 readonly LOG_DIR="${HOME}/.devtools"
 readonly STATE_DIR="${LOG_DIR}/state"
 readonly LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
@@ -123,10 +123,9 @@ require_sudo() {
   printf "Por favor, introduce tu contraseña para continuar.\n\n"
   
   if ! sudo -v; then
-    die "Autenticacion fallida o cancelada. El script no puede continuar sin sudo."
+    die "Autenticacion fallida o cancelada. El script no puede continuar."
   fi
   
-  # Mantener sudo vivo en segundo plano
   ( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 $$ 2>/dev/null || exit; done ) &
   log_msg "Sudo autenticado y mantenido en segundo plano."
 }
@@ -170,8 +169,11 @@ install_curl_script() {
     zoxide) $DRY_RUN || curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
     ollama) $DRY_RUN || curl -fsSL https://ollama.com/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
     docker)
-      $DRY_RUN || curl -fsSL https://get.docker.com | sudo sh &>> "$LOG_FILE" || return 1
-      $DRY_RUN || sudo usermod -aG docker "$USER" 2>/dev/null || true ;;
+      $DRY_RUN || { 
+        # Plan A: Script oficial. Plan B: Repo normal de Ubuntu
+        curl -fsSL https://get.docker.com | sudo sh || sudo apt-get install -y docker.io docker-compose
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+      } &>> "$LOG_FILE" || return 1 ;;
     *) return 1 ;;
   esac
 }
@@ -188,20 +190,21 @@ install_pipx() { $DRY_RUN || pipx install "$1" &>> "$LOG_FILE" || return 1; }
 install_repo() {
   local pkg="$2"
   if [[ "$OS_ID" == "debian" ]]; then
-    # Crear carpetas oficiales actualizadas para Ubuntu/Debian
     $DRY_RUN || sudo mkdir -p -m 755 /etc/apt/keyrings
     
     case "$pkg" in
       gh)
         if ! check_cmd "gh --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/etc/apt/keyrings/githubcli-archive-keyring.gpg &>/dev/null
+          $DRY_RUN || { 
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
             sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-            sudo apt-get update -qq && sudo apt-get install -y gh; } &>> "$LOG_FILE" || return 1
+            sudo apt-get update -qq || true # El '|| true' salva la instalacion si falla otro repositorio
+            sudo apt-get install -y gh; 
+          } &>> "$LOG_FILE" || return 1
         else install_apt "gh" || return 1; fi ;;
       lazygit)
         $DRY_RUN || {
-          # Descargar binario directamente para evitar problemas con PPA rotos
           local LAZYGIT_VERSION
           LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
           curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
@@ -211,17 +214,23 @@ install_repo() {
         } &>> "$LOG_FILE" || return 1 ;;
       code)
         if ! check_cmd "code --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/packages.microsoft.gpg
+          $DRY_RUN || { 
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/packages.microsoft.gpg
             sudo chmod go+r /etc/apt/keyrings/packages.microsoft.gpg
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null
-            sudo apt-get update -qq && sudo apt-get install -y code; } &>> "$LOG_FILE" || return 1
+            sudo apt-get update -qq || true
+            sudo apt-get install -y code; 
+          } &>> "$LOG_FILE" || return 1
         else install_apt "code" || return 1; fi ;;
       brave-browser)
         if ! check_cmd "brave-browser --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo dd of=/etc/apt/keyrings/brave-browser-archive-keyring.gpg &>/dev/null
+          $DRY_RUN || { 
+            curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo tee /etc/apt/keyrings/brave-browser-archive-keyring.gpg >/dev/null
             sudo chmod go+r /etc/apt/keyrings/brave-browser-archive-keyring.gpg
             echo "deb [signed-by=/etc/apt/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list >/dev/null
-            sudo apt-get update -qq && sudo apt-get install -y brave-browser; } &>> "$LOG_FILE" || return 1
+            sudo apt-get update -qq || true
+            sudo apt-get install -y brave-browser; 
+          } &>> "$LOG_FILE" || return 1
         else install_apt "brave-browser" || return 1; fi ;;
       *) install_apt "$pkg" || return 1 ;;
     esac
@@ -273,7 +282,6 @@ install_custom() {
 main() {
   mkdir -p "$LOG_DIR" "$STATE_DIR" "$HOME/.local/bin" "$HOME/.npm-global/bin"
   
-  # Auto-parchear shell
   patch_rc_file "$HOME/.bashrc"
   patch_rc_file "$HOME/.zshrc"
 
@@ -287,7 +295,7 @@ main() {
     esac
   else die "Sistema no soportado."; fi
 
-  # PEDIR SUDO ANTES DE NADA
+  # PEDIR SUDO
   require_sudo
 
   clear 2>/dev/null || true
@@ -296,7 +304,6 @@ main() {
   TOTAL_TOOLS=${#TOOLS[@]}
   local current=0
 
-  # Actualizar cache de apt/pacman/dnf (solo si es mas antigua de 24h)
   local apt_cache_file="/var/cache/apt/pkgcache.bin"
   local skip_pkg_update=false
   if [[ "$PKG_MANAGER" == "apt" && -f "$apt_cache_file" ]]; then
@@ -325,7 +332,6 @@ main() {
     local had_it=false
     check_cmd "$T_CHECK" 2>/dev/null && had_it=true
 
-    # LÓGICA DE 24 HORAS (Evitar actualizar si se hizo hace menos de 1 día)
     local state_file="$STATE_DIR/$(echo "$T_NAME" | tr -d ' /()')"
     local skip_update=false
 
@@ -358,7 +364,7 @@ main() {
 
     if $install_ok; then
       ((INSTALLED_COUNT++)) || true
-      touch "$state_file" # Actualizar la marca de tiempo de la herramienta
+      touch "$state_file"
       printf '%bOK%b\n' "${C_GREEN}" "${C_RESET}"
     else
       ((FAILED_COUNT++)) || true
