@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  DevTools v5.1 - The Bulletproof Update (Bypass broken PPAs)
+#  DevTools v6.0 - Ultimate Edition (Whiptail UI, Sudo Lock, Smart Cache)
 # =============================================================================
 
 set -eo pipefail
@@ -11,7 +11,7 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
 
 # ── Configuracion ──────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="5.1.0"
+readonly SCRIPT_VERSION="6.0.0"
 readonly LOG_DIR="${HOME}/.devtools"
 readonly STATE_DIR="${LOG_DIR}/state"
 readonly LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
@@ -36,13 +36,13 @@ readonly ICON_FAIL="${C_RED}✘${C_RESET}"
 # ── Globales ───────────────────────────────────────────────────────────────
 DRY_RUN=false
 QUIET=false
-ONLY_GROUP=""
 OS_ID=""
 PKG_MANAGER=""
 TOTAL_TOOLS=0
 INSTALLED_COUNT=0
 FAILED_COUNT=0
 SKIPPED_COUNT=0
+declare -a SELECTED_TOOLS_ARRAY
 
 trap 'printf "\n%b ERROR inesperado (codigo %d). Revisa el log: %s%b\n" "$BG_RED" "$?" "$LOG_FILE" "$C_RESET" >&2' ERR
 
@@ -82,7 +82,7 @@ readonly TOOLS=(
   "Ollama§ollama --version§curl§ollama§--version§ia"
   "Claude Code§claude --version§npm§@anthropic-ai/claude-code§--version§ia"
   "DeepSeek TUI§deepseek --version§npm§deepseek-tui§--version§ia"
-  "Antigravity§antigravity --version§npm§antigravity§--version§ia"
+  "Antigravity§antigravity --version§repo§antigravity§--version§ia"
 )
 
 # =============================================================================
@@ -145,6 +145,67 @@ patch_rc_file() {
 }
 
 # =============================================================================
+#  BANNER Y MENU INTERACTIVO
+# =============================================================================
+banner() {
+  clear 2>/dev/null || true
+  printf '%b' "${C_CYAN}${C_BOLD}"
+  cat << 'ENDOFBANNER'
+╔══════════════════════════════════════════════════════════╗
+║                                                          ║
+║           ██████╗ ███████╗██╗   ██╗                      ║
+║           ██╔══██╗██╔════╝██║   ██║                      ║
+║           ██║  ██║█████╗  ██║   ██║                      ║
+║           ██║  ██║██╔══╝  ╚██╗ ██╔╝                      ║
+║           ██████╔╝███████╗ ╚████╔╝                       ║
+║           ╚═════╝ ╚══════╝  ╚═══╝                        ║
+║                                                          ║
+║           Herramientas de Desarrollo                     ║
+║               con Inteligencia Artificial                ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
+ENDOFBANNER
+  printf '%b' "${C_RESET}"
+  printf '  %bVersion %s  |  %s  |  Debian / Arch / Fedora%b\n\n' "${C_DIM}" "$SCRIPT_VERSION" "$(date +%Y)" "${C_RESET}"
+}
+
+menu_interactivo() {
+  # Instalar whiptail (librería gráfica de menús) si no existe
+  if ! command -v whiptail &>/dev/null; then
+    printf "  Instalando dependencias de la interfaz...\n"
+    case "$PKG_MANAGER" in
+      apt) sudo apt-get install -y whiptail &>/dev/null ;;
+      pacman) sudo pacman -Sy --noconfirm libnewt &>/dev/null ;;
+      dnf) sudo dnf install -y newt &>/dev/null ;;
+    esac
+  fi
+
+  local opciones=()
+  for tool in "${TOOLS[@]}"; do
+    parse_tool "$tool"
+    # Todas las opciones marcadas por defecto ("ON")
+    opciones+=("$T_NAME" "Grupo: $T_GROUP" "ON")
+  done
+
+  # Mostrar el checklist de Whiptail
+  local SELECCION
+  SELECCION=$(whiptail --title "DevTools v$SCRIPT_VERSION" --checklist \
+    "Selecciona las herramientas a instalar o actualizar.\n(Usa ESPACIO para marcar/desmarcar y ENTER para confirmar):" \
+    25 80 15 "${opciones[@]}" 3>&1 1>&2 2>&3) || true
+
+  if [[ -z "$SELECCION" ]]; then
+    printf '\n  %bInstalacion cancelada por el usuario.%b\n\n' "${C_YELLOW}" "${C_RESET}"
+    exit 0
+  fi
+
+  # Transformar la selección de Whiptail en un Array puro de Bash
+  eval set -- $SELECCION
+  SELECTED_TOOLS_ARRAY=("$@")
+  
+  printf '  %bHas seleccionado %d herramientas para instalar/verificar.%b\n\n' "${C_CYAN}" "${#SELECTED_TOOLS_ARRAY[@]}" "${C_RESET}"
+}
+
+# =============================================================================
 #  INSTALADORES ESPECIFICOS
 # =============================================================================
 install_apt() { $DRY_RUN || sudo apt-get install -y $1 &>> "$LOG_FILE" || return 1; }
@@ -170,7 +231,6 @@ install_curl_script() {
     ollama) $DRY_RUN || curl -fsSL https://ollama.com/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
     docker)
       $DRY_RUN || { 
-        # Plan A: Script oficial. Plan B: Repo normal de Ubuntu
         curl -fsSL https://get.docker.com | sudo sh || sudo apt-get install -y docker.io docker-compose
         sudo usermod -aG docker "$USER" 2>/dev/null || true
       } &>> "$LOG_FILE" || return 1 ;;
@@ -195,43 +255,39 @@ install_repo() {
     case "$pkg" in
       gh)
         if ! check_cmd "gh --version" 2>/dev/null; then
-          $DRY_RUN || { 
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+          $DRY_RUN || { curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
             sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-            sudo apt-get update -qq || true # El '|| true' salva la instalacion si falla otro repositorio
-            sudo apt-get install -y gh; 
-          } &>> "$LOG_FILE" || return 1
+            sudo apt-get update -qq || true; sudo apt-get install -y gh; } &>> "$LOG_FILE" || return 1
         else install_apt "gh" || return 1; fi ;;
       lazygit)
         $DRY_RUN || {
           local LAZYGIT_VERSION
           LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
           curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
-          tar xf lazygit.tar.gz lazygit
-          sudo install lazygit /usr/local/bin
-          rm lazygit.tar.gz lazygit
+          tar xf lazygit.tar.gz lazygit; sudo install lazygit /usr/local/bin; rm lazygit.tar.gz lazygit
         } &>> "$LOG_FILE" || return 1 ;;
       code)
         if ! check_cmd "code --version" 2>/dev/null; then
-          $DRY_RUN || { 
-            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/packages.microsoft.gpg
+          $DRY_RUN || { curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/packages.microsoft.gpg
             sudo chmod go+r /etc/apt/keyrings/packages.microsoft.gpg
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null
-            sudo apt-get update -qq || true
-            sudo apt-get install -y code; 
-          } &>> "$LOG_FILE" || return 1
+            sudo apt-get update -qq || true; sudo apt-get install -y code; } &>> "$LOG_FILE" || return 1
         else install_apt "code" || return 1; fi ;;
       brave-browser)
         if ! check_cmd "brave-browser --version" 2>/dev/null; then
-          $DRY_RUN || { 
-            curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo tee /etc/apt/keyrings/brave-browser-archive-keyring.gpg >/dev/null
+          $DRY_RUN || { curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo tee /etc/apt/keyrings/brave-browser-archive-keyring.gpg >/dev/null
             sudo chmod go+r /etc/apt/keyrings/brave-browser-archive-keyring.gpg
             echo "deb [signed-by=/etc/apt/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list >/dev/null
-            sudo apt-get update -qq || true
-            sudo apt-get install -y brave-browser; 
-          } &>> "$LOG_FILE" || return 1
+            sudo apt-get update -qq || true; sudo apt-get install -y brave-browser; } &>> "$LOG_FILE" || return 1
         else install_apt "brave-browser" || return 1; fi ;;
+      antigravity)
+        if ! check_cmd "antigravity --version" 2>/dev/null; then
+          $DRY_RUN || { curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/antigravity-repo-key.gpg
+            sudo chmod go+r /etc/apt/keyrings/antigravity-repo-key.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | sudo tee /etc/apt/sources.list.d/antigravity.list >/dev/null
+            sudo apt-get update -qq || true; sudo apt-get install -y antigravity; } &>> "$LOG_FILE" || return 1
+        else install_apt "antigravity" || return 1; fi ;;
       *) install_apt "$pkg" || return 1 ;;
     esac
   elif [[ "$OS_ID" == "arch" ]]; then
@@ -295,15 +351,14 @@ main() {
     esac
   else die "Sistema no soportado."; fi
 
-  # PEDIR SUDO
+  # 1. PEDIR SUDO
   require_sudo
 
-  clear 2>/dev/null || true
-  printf '\n%b  DevTools v%s (Smart Edition)%b\n\n' "${C_CYAN}${C_BOLD}" "$SCRIPT_VERSION" "${C_RESET}"
+  # 2. MOSTRAR BANNER Y MENÚ INTERACTIVO
+  banner
+  menu_interactivo
 
-  TOTAL_TOOLS=${#TOOLS[@]}
-  local current=0
-
+  # 3. ACTUALIZAR CACHÉ DEL SISTEMA
   local apt_cache_file="/var/cache/apt/pkgcache.bin"
   local skip_pkg_update=false
   if [[ "$PKG_MANAGER" == "apt" && -f "$apt_cache_file" ]]; then
@@ -323,59 +378,71 @@ main() {
     esac
   fi
 
-  for tool in "${TOOLS[@]}"; do
-    parse_tool "$tool"
-    ((current++)) || true
-    
-    printf '\r  [%2d/%2d] Instalando %-25s ' "$current" "$TOTAL_TOOLS" "${T_NAME:0:25}"
+  TOTAL_TOOLS=${#SELECTED_TOOLS_ARRAY[@]}
+  local current=0
 
-    local had_it=false
-    check_cmd "$T_CHECK" 2>/dev/null && had_it=true
+  # 4. BUCLE DE INSTALACIÓN (Solo las seleccionadas)
+  for st in "${SELECTED_TOOLS_ARRAY[@]}"; do
+    # Buscar el registro de la herramienta en el array global
+    for tool in "${TOOLS[@]}"; do
+      parse_tool "$tool"
+      if [[ "$T_NAME" == "$st" ]]; then
+        
+        ((current++)) || true
+        printf '\r  [%2d/%2d] Procesando %-25s ' "$current" "$TOTAL_TOOLS" "${T_NAME:0:25}"
 
-    local state_file="$STATE_DIR/$(echo "$T_NAME" | tr -d ' /()')"
-    local skip_update=false
+        local had_it=false
+        check_cmd "$T_CHECK" 2>/dev/null && had_it=true
 
-    if $had_it && [[ -f "$state_file" ]]; then
-      local last_upd=$(stat -c %Y "$state_file" 2>/dev/null || echo 0)
-      local now=$(date +%s)
-      if (( now - last_upd < UPDATE_CACHE_SEC )); then
-        skip_update=true
+        local state_file="$STATE_DIR/$(echo "$T_NAME" | tr -d ' /()')"
+        local skip_update=false
+
+        if $had_it && [[ -f "$state_file" ]]; then
+          local last_upd=$(stat -c %Y "$state_file" 2>/dev/null || echo 0)
+          local now=$(date +%s)
+          if (( now - last_upd < UPDATE_CACHE_SEC )); then
+            skip_update=true
+          fi
+        fi
+
+        if $skip_update; then
+          ((SKIPPED_COUNT++)) || true
+          printf '%bOMITIDO (Act. <24h)%b\n' "${C_DIM}" "${C_RESET}"
+          break # Rompe el for interno para pasar a la siguiente herramienta seleccionada
+        fi
+
+        local install_ok=false
+        case "$T_TYPE" in
+          apt) install_apt "$T_PKG" && install_ok=true ;;
+          pacman) install_pacman "$T_PKG" && install_ok=true ;;
+          dnf) install_dnf "$T_PKG" && install_ok=true ;;
+          curl) install_curl_script "$T_NAME" "$T_PKG" && install_ok=true ;;
+          npm) install_npm "$T_PKG" && install_ok=true ;;
+          pipx) install_pipx "$T_PKG" && install_ok=true ;;
+          repo) install_repo "$T_NAME" "$T_PKG" && install_ok=true ;;
+          flatpak) install_flatpak "$T_PKG" && install_ok=true ;;
+          custom) install_custom "$T_NAME" "$T_PKG" && install_ok=true ;;
+        esac
+
+        if $install_ok; then
+          ((INSTALLED_COUNT++)) || true
+          touch "$state_file"
+          printf '%bOK%b\n' "${C_GREEN}" "${C_RESET}"
+        else
+          ((FAILED_COUNT++)) || true
+          printf '%bFAIL%b\n' "${C_RED}" "${C_RESET}"
+        fi
+        
+        break # Herramienta procesada, salir del bucle de búsqueda
       fi
-    fi
-
-    if $skip_update; then
-      ((SKIPPED_COUNT++)) || true
-      printf '%bOMITIDO (Act. <24h)%b\n' "${C_DIM}" "${C_RESET}"
-      continue
-    fi
-
-    local install_ok=false
-    case "$T_TYPE" in
-      apt) install_apt "$T_PKG" && install_ok=true ;;
-      pacman) install_pacman "$T_PKG" && install_ok=true ;;
-      dnf) install_dnf "$T_PKG" && install_ok=true ;;
-      curl) install_curl_script "$T_NAME" "$T_PKG" && install_ok=true ;;
-      npm) install_npm "$T_PKG" && install_ok=true ;;
-      pipx) install_pipx "$T_PKG" && install_ok=true ;;
-      repo) install_repo "$T_NAME" "$T_PKG" && install_ok=true ;;
-      flatpak) install_flatpak "$T_PKG" && install_ok=true ;;
-      custom) install_custom "$T_NAME" "$T_PKG" && install_ok=true ;;
-    esac
-
-    if $install_ok; then
-      ((INSTALLED_COUNT++)) || true
-      touch "$state_file"
-      printf '%bOK%b\n' "${C_GREEN}" "${C_RESET}"
-    else
-      ((FAILED_COUNT++)) || true
-      printf '%bFAIL%b\n' "${C_RED}" "${C_RESET}"
-    fi
+    done
   done
 
+  # 5. RESUMEN FINAL
   printf '\n%bInstalacion terminada.%b\n' "${C_BOLD}" "${C_RESET}"
   printf 'Exitosos: %b%d%b | Omitidos: %b%d%b | Fallos: %b%d%b\n\n' "${C_GREEN}" "$INSTALLED_COUNT" "${C_RESET}" "${C_DIM}" "$SKIPPED_COUNT" "${C_RESET}" "${C_RED}" "$FAILED_COUNT" "${C_RESET}"
   
-  printf '%b¡IMPORTANTE: Cierra esta terminal por completo y abre una nueva para aplicar las rutas!%b\n\n' "${BG_RED}${C_WHITE}" "${C_RESET}"
+  printf '%b¡IMPORTANTE: Cierra esta terminal por completo y abre una nueva para aplicar todos los cambios!%b\n\n' "${BG_RED}${C_WHITE}" "${C_RESET}"
 }
 
 main "$@"
