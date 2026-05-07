@@ -145,10 +145,9 @@ get_version() {
 
 # Parsear un registro de herramienta
 parse_tool() {
-  # Uso: parse_tool "campo§campo§..." → establece name,check,type,pkg,flag,group
-  local tool="$1"
+  # Uso: parse_tool "campo§campo§..." → establece T_NAME, T_CHECK, T_TYPE, T_PKG, T_FLAG, T_GROUP
+  local tool="$1" name check type pkg flag group
   IFS="$DELIM" read -r name check type pkg flag group <<< "$tool"
-  # Exportar para que el llamador use estas variables globales
   T_NAME="$name"; T_CHECK="$check"; T_TYPE="$type"
   T_PKG="$pkg"; T_FLAG="$flag"; T_GROUP="$group"
 }
@@ -293,7 +292,7 @@ update_pkg_index() {
 
 install_apt() {
   local pkg="$1"
-  if dpkg -l "$pkg" &>/dev/null 2>&1; then
+  if dpkg -s "$pkg" &>/dev/null; then
     info "${pkg}: actualizando..."
     $DRY_RUN || sudo apt-get install --only-upgrade -y "$pkg" &>> "$LOG_FILE" || return 1
   else
@@ -442,8 +441,11 @@ install_custom() {
 # =============================================================================
 
 progress_bar() {
-  local current="$1" total="$2" name="$3" pct=$(( current * 100 / total ))
-  local filled=$(( pct / 4 )) empty=$(( 25 - filled )) i
+  local current="$1" total="$2" name="$3" pct filled empty i
+  (( total == 0 )) && return 0
+  pct=$(( current * 100 / total ))
+  filled=$(( pct / 4 ))
+  empty=$(( 25 - filled ))
   printf '\r  [%b' "${C_CYAN}"
   for ((i=0; i<filled; i++)); do printf '#'; done
   printf '%b' "${C_DIM}"
@@ -454,9 +456,11 @@ progress_bar() {
 install_all() {
   section "Instalando / Actualizando herramientas"
   printf '\n'
-  update_pkg_index
 
   TOTAL_TOOLS=${#TOOLS[@]}
+  (( TOTAL_TOOLS == 0 )) && { warn "No hay herramientas definidas."; return 1; }
+
+  update_pkg_index
   local current=0 had_it install_ok
 
   for tool in "${TOOLS[@]}"; do
