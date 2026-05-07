@@ -9,6 +9,10 @@
 set -eo pipefail
 shopt -s extglob
 
+# Exportar rutas comunes por si se instalan herramientas en la misma sesión
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
+
 # ── Configuracion ──────────────────────────────────────────────────────────
 readonly SCRIPT_VERSION="3.0.0"
 readonly LOG_DIR="${HOME}/.devtools"
@@ -53,7 +57,6 @@ trap 'printf "\n%b ERROR inesperado (codigo %d). Log: %s%b\n" "$BG_RED" "$?" "$L
 #  HERRAMIENTAS
 #  Formato: name § check_cmd § type § package § version_flag § group
 #  type: apt | pacman | dnf | curl | npm | pipx | repo | flatpak | custom
-#  check_cmd admite || (segun tipo shell, no rompe el parser porque usamos §)
 # =============================================================================
 readonly TOOLS=(
   "curl§curl --version§apt§curl§--version§core"
@@ -116,13 +119,10 @@ die() {
 check_cmd() {
   local cmd="$1"
   if [[ "$cmd" == \[* ]]; then
-    # Expresion condicional: [ -d ... ] o similar
     eval "$cmd" 2>/dev/null || return 1
   elif [[ "$cmd" == bash\ -c* ]]; then
-    # Comando envuelto en bash -c para proteger ||
     eval "$cmd" 2>/dev/null || return 1
   else
-    # Comando simple con posible `||` dentro (protegido por el bash -c wrapper)
     command -v "${cmd%% *}" &>/dev/null || return 1
   fi
 }
@@ -132,7 +132,6 @@ get_version() {
   if [[ "$check_cmd" == \[* ]]; then
     printf 'instalado'
   elif [[ "$check_cmd" == bash\ -c* ]]; then
-    # Ejecutar con bash -c
     raw=$(bash -c "${check_cmd#bash -c }" 2>/dev/null | head -1) || true
     printf '%s' "${raw:-instalado}"
   elif [[ -n "$flag" ]]; then
@@ -143,9 +142,7 @@ get_version() {
   fi
 }
 
-# Parsear un registro de herramienta
 parse_tool() {
-  # Uso: parse_tool "campo§campo§..." → establece T_NAME, T_CHECK, T_TYPE, T_PKG, T_FLAG, T_GROUP
   local tool="$1" name check type pkg flag group
   IFS="$DELIM" read -r name check type pkg flag group <<< "$tool"
   T_NAME="$name"; T_CHECK="$check"; T_TYPE="$type"
@@ -308,16 +305,24 @@ install_dnf() {
   $DRY_RUN || sudo dnf install -y "$1" &>> "$LOG_FILE" || return 1
 }
 
+# Helper para cargar fnm en la sesión actual
+load_fnm() {
+  export FNM_PATH="${HOME}/.local/share/fnm"
+  if [[ -d "$FNM_PATH" ]]; then
+    export PATH="$FNM_PATH:$PATH"
+    eval "$(fnm env)" 2>/dev/null || true
+  fi
+}
+
 install_curl_script() {
   local name="$1" pkg="$2"
   case "$pkg" in
     fnm)
       $DRY_RUN && return 0
       if ! check_cmd "fnm --version" 2>/dev/null; then
-        curl -fsSL https://fnm.vercel.app/install | bash &>> "$LOG_FILE" || return 1
+        curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell &>> "$LOG_FILE" || return 1
       fi
-      export FNM_PATH="${HOME}/.local/share/fnm"
-      [[ -s "$FNM_PATH/fnm" ]] && export PATH="$FNM_PATH:$PATH"
+      load_fnm
       ;;
     zoxide)   $DRY_RUN || curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
     ollama)   $DRY_RUN || curl -fsSL https://ollama.com/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
@@ -330,6 +335,7 @@ install_curl_script() {
 }
 
 install_npm() {
+  load_fnm # Asegurar que npm esté disponible si Node se acaba de instalar
   $DRY_RUN || npm install -g "$1" &>> "$LOG_FILE" || return 1
 }
 
@@ -413,14 +419,14 @@ install_custom() {
   local name="$1" pkg="$2"
   case "$pkg" in
     node)
-      export FNM_PATH="${HOME}/.local/share/fnm"
-      [[ -s "$FNM_PATH/fnm" ]] && export PATH="$FNM_PATH:$PATH"
+      load_fnm
       if command -v fnm &>/dev/null; then
         $DRY_RUN || fnm install --lts &>> "$LOG_FILE" || return 1
         $DRY_RUN || fnm default lts-latest &>> "$LOG_FILE" || return 1
       else warn "fnm no disponible"; return 1; fi
       ;;
     npm)
+      load_fnm
       $DRY_RUN || npm install -g npm@latest &>> "$LOG_FILE" || return 1 ;;
     ohmyzsh)
       if [[ ! -d "${HOME}/.oh-my-zsh" ]]; then
