@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  DevTools v4.0 - Instalador a prueba de bombas (Fix Rutas + Wrappers)
+#  DevTools v5.0 - Sudo Pre-Check, Smart 24h Cache & Repo Fixes
 # =============================================================================
 
 set -eo pipefail
@@ -11,11 +11,13 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"
 
 # ── Configuracion ──────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="4.0.0"
+readonly SCRIPT_VERSION="5.0.0"
 readonly LOG_DIR="${HOME}/.devtools"
+readonly STATE_DIR="${LOG_DIR}/state"
 readonly LOG_FILE="${LOG_DIR}/install_$(date +%Y%m%d_%H%M%S).log"
 readonly MIN_DISK_MB=5120
 readonly DELIM='§'
+readonly UPDATE_CACHE_SEC=86400 # 24 horas en segundos
 
 # ── Colores ────────────────────────────────────────────────────────────────
 declare -r C_RESET=$'\033[0m'
@@ -40,6 +42,7 @@ PKG_MANAGER=""
 TOTAL_TOOLS=0
 INSTALLED_COUNT=0
 FAILED_COUNT=0
+SKIPPED_COUNT=0
 
 trap 'printf "\n%b ERROR inesperado (codigo %d). Revisa el log: %s%b\n" "$BG_RED" "$?" "$LOG_FILE" "$C_RESET" >&2' ERR
 
@@ -112,7 +115,24 @@ parse_tool() {
 }
 
 # =============================================================================
-#  AUTOCONFIGURAR RUTAS (MAGIA PARA QUE NO FALLE DEEPSEEK NI NODE)
+#  SUDO Y PERMISOS
+# =============================================================================
+require_sudo() {
+  clear
+  printf "%bATENCION: Este instalador requiere privilegios de administrador (root)%b\n" "${C_YELLOW}${C_BOLD}" "${C_RESET}"
+  printf "Por favor, introduce tu contraseña para continuar.\n\n"
+  
+  if ! sudo -v; then
+    die "Autenticacion fallida o cancelada. El script no puede continuar sin sudo."
+  fi
+  
+  # Mantener sudo vivo en segundo plano
+  ( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 $$ 2>/dev/null || exit; done ) &
+  log_msg "Sudo autenticado y mantenido en segundo plano."
+}
+
+# =============================================================================
+#  AUTOCONFIGURAR RUTAS
 # =============================================================================
 patch_rc_file() {
   local rc_file="$1"
@@ -122,7 +142,6 @@ patch_rc_file() {
     printf 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:$PATH"\n' >> "$rc_file"
     printf 'export FNM_PATH="$HOME/.local/share/fnm"\n' >> "$rc_file"
     printf 'if [ -d "$FNM_PATH" ]; then\n  export PATH="$FNM_PATH:$PATH"\n  eval "$(fnm env)"\nfi\n' >> "$rc_file"
-    log_msg "Rutas inyectadas en $rc_file"
   fi
 }
 
@@ -144,15 +163,14 @@ load_fnm() {
 install_curl_script() {
   case "$2" in
     fnm)
-      $DRY_RUN && return 0
       if ! check_cmd "fnm --version" 2>/dev/null; then
-        curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell &>> "$LOG_FILE" || return 1
+        $DRY_RUN || curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell &>> "$LOG_FILE" || return 1
       fi
       load_fnm ;;
     zoxide) $DRY_RUN || curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
     ollama) $DRY_RUN || curl -fsSL https://ollama.com/install.sh | sh &>> "$LOG_FILE" || return 1 ;;
     docker)
-      $DRY_RUN || curl -fsSL https://get.docker.com | sh &>> "$LOG_FILE" || return 1
+      $DRY_RUN || curl -fsSL https://get.docker.com | sudo sh &>> "$LOG_FILE" || return 1
       $DRY_RUN || sudo usermod -aG docker "$USER" 2>/dev/null || true ;;
     *) return 1 ;;
   esac
@@ -161,7 +179,7 @@ install_curl_script() {
 install_npm() {
   load_fnm
   mkdir -p "$HOME/.npm-global/bin"
-  npm config set prefix "$HOME/.npm-global"
+  npm config set prefix "$HOME/.npm-global" 2>/dev/null || true
   $DRY_RUN || npm install -g "$1" &>> "$LOG_FILE" || return 1
 }
 
@@ -170,26 +188,39 @@ install_pipx() { $DRY_RUN || pipx install "$1" &>> "$LOG_FILE" || return 1; }
 install_repo() {
   local pkg="$2"
   if [[ "$OS_ID" == "debian" ]]; then
+    # Crear carpetas oficiales actualizadas para Ubuntu/Debian
+    $DRY_RUN || sudo mkdir -p -m 755 /etc/apt/keyrings
+    
     case "$pkg" in
       gh)
         if ! check_cmd "gh --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg &>/dev/null
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          $DRY_RUN || { curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/etc/apt/keyrings/githubcli-archive-keyring.gpg &>/dev/null
+            sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -qq && sudo apt-get install -y gh; } &>> "$LOG_FILE" || return 1
         else install_apt "gh" || return 1; fi ;;
       lazygit)
-        $DRY_RUN || { sudo add-apt-repository -y ppa:lazygit-team/release &>/dev/null
-          sudo apt-get update -qq && sudo apt-get install -y lazygit; } &>> "$LOG_FILE" || return 1 ;;
+        $DRY_RUN || {
+          # Descargar binario directamente para evitar problemas con PPA rotos
+          local LAZYGIT_VERSION
+          LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+          curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+          tar xf lazygit.tar.gz lazygit
+          sudo install lazygit /usr/local/bin
+          rm lazygit.tar.gz lazygit
+        } &>> "$LOG_FILE" || return 1 ;;
       code)
         if ! check_cmd "code --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/packages.microsoft.gpg >/dev/null
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null
+          $DRY_RUN || { curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/packages.microsoft.gpg
+            sudo chmod go+r /etc/apt/keyrings/packages.microsoft.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | sudo tee /etc/apt/sources.list.d/vscode.list >/dev/null
             sudo apt-get update -qq && sudo apt-get install -y code; } &>> "$LOG_FILE" || return 1
         else install_apt "code" || return 1; fi ;;
       brave-browser)
         if ! check_cmd "brave-browser --version" 2>/dev/null; then
-          $DRY_RUN || { curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/brave-browser-archive-keyring.gpg &>/dev/null
-            echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list >/dev/null
+          $DRY_RUN || { curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo dd of=/etc/apt/keyrings/brave-browser-archive-keyring.gpg &>/dev/null
+            sudo chmod go+r /etc/apt/keyrings/brave-browser-archive-keyring.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/brave-browser-archive-keyring.gpg] https://brave-browser-apt-release.s3.brave.com/ stable main" | sudo tee /etc/apt/sources.list.d/brave-browser-release.list >/dev/null
             sudo apt-get update -qq && sudo apt-get install -y brave-browser; } &>> "$LOG_FILE" || return 1
         else install_apt "brave-browser" || return 1; fi ;;
       *) install_apt "$pkg" || return 1 ;;
@@ -214,9 +245,10 @@ install_flatpak() {
   if ! command -v flatpak &>/dev/null; then
     install_apt flatpak 2>/dev/null || install_pacman flatpak 2>/dev/null || install_dnf flatpak 2>/dev/null || return 1
   fi
-  $DRY_RUN || flatpak install -y flathub "$1" &>> "$LOG_FILE" || return 1
+  
+  $DRY_RUN || sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo &>> "$LOG_FILE" || true
+  $DRY_RUN || sudo flatpak install -y flathub "$1" &>> "$LOG_FILE" || return 1
 
-  # CREAR ATAJO PARA OBSIDIAN
   if [[ "$1" == "md.obsidian.Obsidian" ]]; then
     mkdir -p "$HOME/.local/bin"
     echo '#!/usr/bin/env bash' > "$HOME/.local/bin/obsidian"
@@ -229,7 +261,7 @@ install_custom() {
   case "$2" in
     node) load_fnm; if command -v fnm &>/dev/null; then $DRY_RUN || { fnm install --lts && fnm default lts-latest; } &>> "$LOG_FILE" || return 1; else return 1; fi ;;
     npm) load_fnm; $DRY_RUN || npm install -g npm@latest &>> "$LOG_FILE" || return 1 ;;
-    ohmyzsh) if [[ ! -d "${HOME}/.oh-my-zsh" ]]; then $DRY_RUN || { sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended; git clone https://github.com/zsh-users/zsh-autosuggestions "${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" 2>/dev/null || true; git clone https://github.com/zsh-users/zsh-syntax-highlighting "${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting" 2>/dev/null || true; } &>> "$LOG_FILE" || return 1; else $DRY_RUN || zsh -c "omz update" &>> "$LOG_FILE" || true; fi ;;
+    ohmyzsh) if [[ ! -d "${HOME}/.oh-my-zsh" ]]; then $DRY_RUN || { sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended; } &>> "$LOG_FILE" || return 1; else $DRY_RUN || zsh -c "omz update" &>> "$LOG_FILE" || true; fi ;;
     btm) if ! command -v cargo &>/dev/null; then $DRY_RUN || sudo apt-get install -y cargo &>> "$LOG_FILE" || return 1; fi; $DRY_RUN || cargo install bottom --locked &>> "$LOG_FILE" || return 1 ;;
     *) return 1 ;;
   esac
@@ -239,9 +271,9 @@ install_custom() {
 #  MOTOR PRINCIPAL
 # =============================================================================
 main() {
-  mkdir -p "$LOG_DIR" "$HOME/.local/bin" "$HOME/.npm-global/bin"
+  mkdir -p "$LOG_DIR" "$STATE_DIR" "$HOME/.local/bin" "$HOME/.npm-global/bin"
   
-  # Auto-parchear shell rc
+  # Auto-parchear shell
   patch_rc_file "$HOME/.bashrc"
   patch_rc_file "$HOME/.zshrc"
 
@@ -255,26 +287,61 @@ main() {
     esac
   else die "Sistema no soportado."; fi
 
-  if command -v sudo &>/dev/null; then sudo -v 2>/dev/null; fi
+  # PEDIR SUDO ANTES DE NADA
+  require_sudo
 
   clear 2>/dev/null || true
-  printf '\n%b  DevTools v%s (Fix Edition)%b\n\n' "${C_CYAN}${C_BOLD}" "$SCRIPT_VERSION" "${C_RESET}"
+  printf '\n%b  DevTools v%s (Smart Edition)%b\n\n' "${C_CYAN}${C_BOLD}" "$SCRIPT_VERSION" "${C_RESET}"
 
   TOTAL_TOOLS=${#TOOLS[@]}
   local current=0
 
-  case "$PKG_MANAGER" in
-    apt) sudo apt-get update -qq 2>> "$LOG_FILE" || true ;;
-    pacman) sudo pacman -Sy --noconfirm &>> "$LOG_FILE" || true ;;
-    dnf) sudo dnf check-update -q &>> "$LOG_FILE" || true ;;
-  esac
+  # Actualizar cache de apt/pacman/dnf (solo si es mas antigua de 24h)
+  local apt_cache_file="/var/cache/apt/pkgcache.bin"
+  local skip_pkg_update=false
+  if [[ "$PKG_MANAGER" == "apt" && -f "$apt_cache_file" ]]; then
+    local last_pkg_upd=$(stat -c %Y "$apt_cache_file" 2>/dev/null || echo 0)
+    local now=$(date +%s)
+    if (( now - last_pkg_upd < UPDATE_CACHE_SEC )); then
+      skip_pkg_update=true
+    fi
+  fi
+
+  if ! $skip_pkg_update; then
+    printf "  Actualizando indices del sistema...\n"
+    case "$PKG_MANAGER" in
+      apt) sudo apt-get update -qq 2>> "$LOG_FILE" || true ;;
+      pacman) sudo pacman -Sy --noconfirm &>> "$LOG_FILE" || true ;;
+      dnf) sudo dnf check-update -q &>> "$LOG_FILE" || true ;;
+    esac
+  fi
 
   for tool in "${TOOLS[@]}"; do
     parse_tool "$tool"
     ((current++)) || true
     
-    # Barra de progreso minimalista
     printf '\r  [%2d/%2d] Instalando %-25s ' "$current" "$TOTAL_TOOLS" "${T_NAME:0:25}"
+
+    local had_it=false
+    check_cmd "$T_CHECK" 2>/dev/null && had_it=true
+
+    # LÓGICA DE 24 HORAS (Evitar actualizar si se hizo hace menos de 1 día)
+    local state_file="$STATE_DIR/$(echo "$T_NAME" | tr -d ' /()')"
+    local skip_update=false
+
+    if $had_it && [[ -f "$state_file" ]]; then
+      local last_upd=$(stat -c %Y "$state_file" 2>/dev/null || echo 0)
+      local now=$(date +%s)
+      if (( now - last_upd < UPDATE_CACHE_SEC )); then
+        skip_update=true
+      fi
+    fi
+
+    if $skip_update; then
+      ((SKIPPED_COUNT++)) || true
+      printf '%bOMITIDO (Act. <24h)%b\n' "${C_DIM}" "${C_RESET}"
+      continue
+    fi
 
     local install_ok=false
     case "$T_TYPE" in
@@ -291,6 +358,7 @@ main() {
 
     if $install_ok; then
       ((INSTALLED_COUNT++)) || true
+      touch "$state_file" # Actualizar la marca de tiempo de la herramienta
       printf '%bOK%b\n' "${C_GREEN}" "${C_RESET}"
     else
       ((FAILED_COUNT++)) || true
@@ -299,9 +367,9 @@ main() {
   done
 
   printf '\n%bInstalacion terminada.%b\n' "${C_BOLD}" "${C_RESET}"
-  printf 'Exitosos: %b%d%b | Fallos: %b%d%b\n\n' "${C_GREEN}" "$INSTALLED_COUNT" "${C_RESET}" "${C_RED}" "$FAILED_COUNT" "${C_RESET}"
+  printf 'Exitosos: %b%d%b | Omitidos: %b%d%b | Fallos: %b%d%b\n\n' "${C_GREEN}" "$INSTALLED_COUNT" "${C_RESET}" "${C_DIM}" "$SKIPPED_COUNT" "${C_RESET}" "${C_RED}" "$FAILED_COUNT" "${C_RESET}"
   
-  printf '%bATENCION: Para que los comandos funcionen, DEBES CERRAR ESTA TERMINAL Y ABRIR UNA NUEVA.%b\n' "${BG_RED}${C_WHITE}" "${C_RESET}"
+  printf '%b¡IMPORTANTE: Cierra esta terminal por completo y abre una nueva para aplicar las rutas!%b\n\n' "${BG_RED}${C_WHITE}" "${C_RESET}"
 }
 
 main "$@"
