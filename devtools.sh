@@ -50,7 +50,7 @@ readonly TOOLS=(
   "node (via fnm)|node --version|custom|node|--version|lang"
   "npm|npm --version|custom|npm|--version|lang"
   "zsh|zsh --version|apt|zsh|--version|shell"
-  "Oh My Zsh|[ -n \"$ZSH\" ] && echo ok|custom|ohmyzsh||shell"
+  "Oh My Zsh|[ -n \"\$ZSH\" ] && echo ok|custom|ohmyzsh||shell"
   "fzf|fzf --version|apt|fzf|--version|shell"
   "ripgrep|rg --version|apt|ripgrep|--version|shell"
   "fd|fd --version|apt|fd-find|--version|shell"
